@@ -1,1 +1,465 @@
+from numpy import diff
+from numpy import char
+from itertools import count
+from numpy._core.defchararray import str_len
+from copy import replace
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import ARIMA
+
+
+
+
+
+df = pd.read_csv(r"C:\Users\G10073190\Documents\\temp_2026-02-03_10-04-47.csv")
+
+df["Temperatuurlocaties"]= df.groupby("encounterId")["Temperatuurlocaties"].ffill()
+print(df["Temperatuurlocaties"])
+
+pd.unique(df["Temperatuurlocaties"])
+print(pd.unique(df["Temperatuurlocaties"]))
+
+blaas_df = df[df["Temperatuurlocaties"] == "Blaas"]
+print(blaas_df)
+
+lies_df = df[df["Temperatuurlocaties"] == "Lies"]
+print(lies_df)
+
+bloed_df = df[df["Temperatuurlocaties"] == "Bloed"]
+print(bloed_df)
+
+oor_df = df[df["Temperatuurlocaties"] == "Oor"]
+print(oor_df)
+
+rectum_df = df[df["Temperatuurlocaties"] == "Rectaal"]
+print(rectum_df)
+
+been_l_df = df[df["Temperatuurlocaties"] == "Been, links"]
+print(been_l_df)
+
+been_r_df= df[df["Temperatuurlocaties"] == "Been, rechts"]
+print(been_r_df)
+
+
+
+
+
+filtered = blaas_df.loc[blaas_df["encounterId"] == 30570]
+plt.scatter(filtered["chartTime"], filtered["Temp."], alpha=0.5)
+
+
+print(filtered["Temp."])
+
+plt.figure(figsize=(10, 5))
+plt.plot(filtered["chartTime"], filtered["Temp."], marker='o', linestyle='-', color='b')
+plt.title("Temperatuurmetingen in de Blaas voor encounterId 3263")
+plt.xlabel("Tijd")
+plt.ylabel("Temperatuur (°C)")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+
+
+df["chartTime"] = pd.to_datetime(df["chartTime"])
+freq = df['chartTime'].diff().dropna().value_counts()
+print(freq)
+
+blaas_df['chartTime']= pd.to_datetime(blaas_df["chartTime"])
+blaas_freq = blaas_df['chartTime'].diff().dropna().value_counts()
+print(blaas_freq)
+
+bloed_df['chartTime']= pd.to_datetime(bloed_df["chartTime"])
+bloed_freq = bloed_df['chartTime'].diff().dropna().value_counts()
+print(bloed_freq)
+
+lies_df['chartTime']= pd.to_datetime(lies_df["chartTime"])
+lies_freq = lies_df['chartTime'].diff().dropna().value_counts()
+print(lies_freq)
+
+oor_df['chartTime']= pd.to_datetime(oor_df["chartTime"])
+oor_freq = oor_df['chartTime'].diff().dropna().value_counts()
+print(oor_freq)
+
+rectum_df['chartTime']= pd.to_datetime(rectum_df["chartTime"])
+rectum_freq = rectum_df['chartTime'].diff().dropna().value_counts()
+print(rectum_freq)
+
+been_l_df['chartTime']= pd.to_datetime(been_l_df["chartTime"])
+been_l_freq = been_l_df['chartTime'].diff().dropna().value_counts()
+print(been_l_freq)
+
+been_r_df['chartTime']= pd.to_datetime(been_r_df["chartTime"])
+been_r_freq = been_r_df['chartTime'].diff().dropna().value_counts()
+print(been_r_freq)
+
+# df['timestamp'] = pd.to_datetime(df['chartTime'], errors ='coerce')
+#
+# blaas_df['timestamp'] = pd.to_datetime(blaas_df['chartTime'], errors ='raise')
+# blaas_df['timestamp']
+#
+# blaas_df = blaas_df.dropna(subset=['timestamp'])
+# blaas_df = blaas_df.sort_values(by='timestamp')
+#
+#
+# agg_map = {}
+#
+# for col in blaas_df.columns:
+#     if col == 'timestamp':
+#         continue
+#     elif pd.api.types.is_numeric_dtype(blaas_df[col]):
+#         agg_map[col] = 'mean'
+#     else:
+#         agg_map[col] = 'first'
+#
+# blaas_df = blaas_df.groupby('timestamp', as_index=False).agg(agg_map)
+# blaas_df = blaas_df.set_index('timestamp').sort_index()
+#
+# blaas_hourly = blaas_df.resample('2h').agg(agg_map)
+#
+# num_cols = blaas_hourly.select_dtypes(include='number').columns
+# blaas_hourly[num_cols] = blaas_hourly[num_cols].interpolate(method='time')
+#
+# blaas_hourly[num_cols] = blaas_hourly[num_cols].ffill().bfill()
+#
+
+
+encounter_df = blaas_df[ 'encounterId'].value_counts()
+print(blaas_df['encounterId'].value_counts())
+
+hour_enc = blaas_hourly['encounterId'].value_counts()
+print(hour_enc)
+
+encounter_dlf = lies_df['encounterId'].value_counts()
+print(encounter_dlf)
+
+print(encounter_dlf.unique())
+
+#
+# diag = (
+#     blaas_df
+#     .assign(timestamp=pd.to_datetime(blaas_df["chartTime"], errors="coerce"))
+#     .dropna(subset=["timestamp"])
+#     .sort_values(["encounterId", "timestamp"])
+#     .groupby("encounterId")
+#     .agg(
+#         n_obs=("timestamp", "size"),
+#         max_gap_h=("timestamp", lambda t: t.diff().dt.total_seconds().div(3600).max()),
+#         start=("timestamp", "first"),
+#     )
+#     .assign(
+#         has_gap_over_2h=lambda d: d["max_gap_h"] > 2,
+#         starts_odd=lambda d: (d["start"].dt.hour % 2 == 1) | (d["start"].dt.minute != 0) | (d["start"].dt.second != 0),
+#         under_30_obs=lambda d: d["n_obs"] < 30,
+#     )
+# )
+#
+# summary = pd.DataFrame({
+#     "series_with_gaps_over_2h": [int(diag["has_gap_over_2h"].sum())],
+#     "series_starting_odd_time": [int(diag["starts_odd"].sum())],
+#     "series_under_50_obs":      [int(diag["under_50_obs"].sum())],
+#     "total_series":             [len(diag)],
+# })
+# print(summary.to_string(index=False))
+# print(diag.head())
+#
+#
+# # --- Evaluate both rules per encounter on blaas_df ---
+# _b = blaas_df.copy()
+# _b["timestamp"] = pd.to_datetime(_b["chartTime"], errors="coerce")
+# _b = _b.dropna(subset=["timestamp"]).sort_values(["encounterId", "timestamp"])
+#
+# per_enc = _b.groupby("encounterId").agg(
+#     n_obs=("timestamp", "size"),
+#     max_gap_h=("timestamp", lambda t: t.diff().dt.total_seconds().div(3600).max()),
+# )
+#
+# under_30  = per_enc["n_obs"] < 30
+# has_gap   = per_enc["max_gap_h"] > 2          # max_gap_h is NaN for 1-obs series → treated as no gap
+# remove    = under_30 | has_gap
+#
+# # Reason label for the collected/removed set
+# reason = pd.Series("", index=per_enc.index)
+# reason[under_30 & ~has_gap] = "under_30_obs"
+# reason[has_gap & ~under_30] = "gap_over_2h"
+# reason[under_30 & has_gap]  = "under_30_obs + gap_over_2h"
+#
+# removed_ids = per_enc.index[remove]
+# kept_ids    = per_enc.index[~remove]
+#
+# # --- Split blaas_df into kept and removed (full rows, not just summaries) ---
+# blaas_kept    = _b[_b["encounterId"].isin(kept_ids)].copy()
+# blaas_removed = _b[_b["encounterId"].isin(removed_ids)].copy()
+#
+# # Attach the removal reason to each removed row
+# blaas_removed = blaas_removed.merge(
+#     reason.rename("removal_reason").reset_index(),
+#     on="encounterId", how="left",
+# )
+#
+# # --- Report ---
+# print(f"encounters total   : {len(per_enc)}")
+# print(f"  kept             : {len(kept_ids)}")
+# print(f"  removed          : {len(removed_ids)}")
+# print(f"    under 30 obs   : {int((under_30).sum())}")
+# print(f"    gap > 2h       : {int((has_gap).sum())}")
+# print(f"    (both)         : {int((under_30 & has_gap).sum())}")
+# print(f"rows total         : {len(_b)} | kept: {len(blaas_kept)} | removed: {len(blaas_removed)}")
+#
+#
+
+
+# # Start from blaas_df, basic 2h resample (closest reading per bin, no averaging)
+# _b = blaas_df.copy()
+# _b["timestamp"] = pd.to_datetime(_b["chartTime"], errors="coerce")
+# _b = _b.dropna(subset=["timestamp", "Temp."]).sort_values(["encounterId", "timestamp"])
+#
+# _b["bin"]   = _b["timestamp"].dt.floor("2h")
+# _b["_dist"] = (_b["timestamp"] - _b["bin"]).abs()
+#
+# resampled = (
+#     _b.sort_values(["encounterId", "bin", "_dist"])
+#       .drop_duplicates(["encounterId", "bin"], keep="first")
+#       .rename(columns={"bin": "timestamp"})
+#       [["encounterId", "timestamp", "Temp."]]
+#       .reset_index(drop=True)
+# )
+#
+# # Keep only series with more than 30 observations
+# obs_per_enc = resampled.groupby("encounterId")["Temp."].size()
+# keep_ids    = obs_per_enc[obs_per_enc > 30].index
+# blaas_2h    = resampled[resampled["encounterId"].isin(keep_ids)].reset_index(drop=True)
+#
+# # Report
+# report = pd.DataFrame([{
+#     "raw_readings":          len(_b),
+#     "after_resample":        len(resampled),
+#     "lost_to_resample":      len(_b) - len(resampled),
+#     "encounters_resampled":  resampled["encounterId"].nunique(),
+#     "encounters_kept_30plus": len(keep_ids),
+#     "encounters_dropped":    resampled["encounterId"].nunique() - len(keep_ids),
+#     "rows_kept":             len(blaas_2h),
+# }])
+# print(report.to_string(index=False))
+
+
+
+
+
+
+
+#
+# # Per-encounter diagnostics on the RESAMPLED series (blaas_2h)
+# diag = (
+#     blaas_2h
+#     .sort_values(["encounterId", "timestamp"])
+#     .groupby("encounterId")
+#     .agg(
+#         n_obs=("timestamp", "size"),
+#         max_gap_h=("timestamp", lambda t: t.diff().dt.total_seconds().div(3600).max()),
+#         start=("timestamp", "first"),
+#     )
+#     .assign(
+#         has_gap_over_2h=lambda d: d["max_gap_h"] > 2,
+#         has_gap_over_4h=lambda d: d["max_gap_h"] > 4,
+#         starts_odd=lambda d: (d["start"].dt.hour % 2 == 1)
+#                              | (d["start"].dt.minute != 0)
+#                              | (d["start"].dt.second != 0),
+#         under_50_obs=lambda d: d["n_obs"] < 50,
+#     )
+# )
+#
+# summary = pd.DataFrame([{
+#     "total_series":             len(diag),
+#     "series_with_gap_over_2h":  int(diag["has_gap_over_2h"].sum()),
+#     "series_with_gap_over_4h":  int(diag["has_gap_over_4h"].sum()),
+#     "series_starting_odd_time": int(diag["starts_odd"].sum()),
+#     "series_under_50_obs":      int(diag["under_50_obs"].sum()),
+# }])
+# print(summary.to_string(index=False))
+# print(diag.head())
+#
+
+blaas_df["Temp."] = pd.to_numeric(
+    blaas_df["Temp."].astype(str).str.replace(",",".", regex=False),errors="coerce"
+)
+print(blaas_df["Temp."].dtype)
+
+print("Nan Temp.", blaas_df["Temp."].isna().sum())
+# =============================================================================
+# Two-stage resample of blaas_df:
+#   Stage 1: round each reading to the nearest WHOLE hour (09:25->09:00, 09:55->10:00)
+#   Stage 2: drop odd-hour readings; even-hour survivors are already the 2h grid
+# =============================================================================
+_b = blaas_df.copy()
+_b["timestamp"] = pd.to_datetime(_b["chartTime"], errors="coerce")
+_b = _b.drop(columns=["chartTime"])                       # avoid duplicate column later
+_b = _b.dropna(subset=["timestamp", "Temp."]).sort_values(["encounterId", "timestamp"])
+
+n_raw = len(_b)
+
+# --- Stage 1: round to nearest whole hour ---
+_b["hour_ts"] = _b["timestamp"].dt.round("1h")
+
+# --- Stage 2: keep only EVEN-hour readings (the 2h grid) ---
+is_even = _b["hour_ts"].dt.hour % 2 == 0
+n_dropped_odd = int((~is_even).sum())
+_b = _b[is_even]
+
+# Distance from the rounded hour to its own value, for closest-wins on collisions
+_b["_dist"] = (_b["timestamp"] - _b["hour_ts"]).abs()
+
+# If two readings round to the same even hour, keep the one closest to it (no averaging)
+resampled = (
+    _b.sort_values(["encounterId", "hour_ts", "_dist"])
+      .drop_duplicates(["encounterId", "hour_ts"], keep="first")
+      .rename(columns={"timestamp": "chartTime", "hour_ts": "timestamp"})
+      [["encounterId", "timestamp", "chartTime", "Temp."]]
+      .reset_index(drop=True)
+)
+
+n_after_collision = len(resampled)
+
+# --- Keep only series with more than 30 observations ---
+obs_per_enc = resampled.groupby("encounterId")["Temp."].size()
+keep_ids    = obs_per_enc[obs_per_enc > 30].index
+blaas_2h    = resampled[resampled["encounterId"].isin(keep_ids)].reset_index(drop=True)
+
+# --- Report ---
+resample_report = pd.DataFrame([{
+    "raw_readings":            n_raw,
+    "dropped_odd_hour":        n_dropped_odd,
+    "after_odd_drop":          n_raw - n_dropped_odd,
+    "lost_to_collision":       (n_raw - n_dropped_odd) - n_after_collision,
+    "after_resample":          n_after_collision,
+    "encounters_resampled":    resampled["encounterId"].nunique(),
+    "encounters_kept_30plus":  len(keep_ids),
+    "encounters_dropped":      resampled["encounterId"].nunique() - len(keep_ids),
+    "rows_kept":               len(blaas_2h),
+}])
+
+print("=== Resample report ===")
+print(resample_report.to_string(index=False))
+print("\nblaas_2h columns:", list(blaas_2h.columns))
+print(blaas_2h.head())
+
+
+# =============================================================================
+# Diagnosis on blaas_2h
+# =============================================================================
+_d = blaas_2h.sort_values(["encounterId", "timestamp"]).copy()
+_d["drift_min"] = (_d["chartTime"] - _d["timestamp"]).abs().dt.total_seconds() / 60
+
+diag = (
+    _d
+    .groupby("encounterId")
+    .agg(
+        n_obs=("timestamp", "size"),
+        max_gap_h=("timestamp", lambda t: t.diff().dt.total_seconds().div(3600).max()),
+        start=("timestamp", "first"),
+        mean_drift_min=("drift_min", "mean"),
+    )
+    .assign(
+        has_gap_over_2h=lambda d: d["max_gap_h"] > 2,
+        has_gap_over_4h=lambda d: d["max_gap_h"] > 4,
+        starts_odd=lambda d: (d["start"].dt.hour % 2 == 1)
+                             | (d["start"].dt.minute != 0)
+                             | (d["start"].dt.second != 0),
+        under_50_obs=lambda d: d["n_obs"] < 50,
+    )
+)
+diag["mean_drift_min"] = diag["mean_drift_min"].round(1)
+
+diagnosis_report = pd.DataFrame([{
+    "total_series":             len(diag),
+    "series_with_gap_over_2h":  int(diag["has_gap_over_2h"].sum()),
+    "series_with_gap_over_4h":  int(diag["has_gap_over_4h"].sum()),
+    "series_starting_odd_time": int(diag["starts_odd"].sum()),
+    "series_under_50_obs":      int(diag["under_50_obs"].sum()),
+}])
+
+print("=== Diagnosis report ===")
+print(diagnosis_report.to_string(index=False))
+print("\n=== Per-encounter detail (head) ===")
+print(diag.head())
+
+
+
+
+# =============================================================================
+# Select series from blaas_2h with (a) >=50 real observations and
+# (b) no gap larger than one missing observation (max_gap <= 4h),
+# then interpolate the single-slot gaps.
+# =============================================================================
+
+# --- Per-encounter qualification (on real observations, before any filling) ---
+qual = (
+    blaas_2h
+    .sort_values(["encounterId", "timestamp"])
+    .groupby("encounterId")
+    .agg(
+        n_obs=("timestamp", "size"),
+        max_gap_h=("timestamp", lambda t: t.diff().dt.total_seconds().div(3600).max()),
+    )
+)
+
+eligible = qual.index[(qual["n_obs"] >= 50) & (qual["max_gap_h"] <= 4)]
+selected = blaas_2h[blaas_2h["encounterId"].isin(eligible)].copy()
+
+# --- Per-encounter: lay down the regular 2h grid and interpolate the holes ---
+interpolated_records = []
+
+def fill_one(g):
+    enc_id = g["encounterId"].iloc[0]
+    s = g.set_index("timestamp")["Temp."].sort_index()
+
+    # Regular 2h grid from first to last real reading
+    full = pd.date_range(s.index.min(), s.index.max(), freq="2h")
+    out = s.reindex(full).to_frame("Temp.")
+    out.index.name = "timestamp"
+
+    was_missing = out["Temp."].isna()
+
+    # Linear interpolation, interior only. Since max_gap <= 4h, every gap is a
+    # single empty slot, so there are no long gaps to revert.
+    out["Temp."] = out["Temp."].interpolate(method="linear", limit_area="inside").round(1)
+
+    out["is_interpolated"] = was_missing & out["Temp."].notna()
+    out["encounterId"]     = enc_id
+    out["chartTime"]       = out.index          # synthetic rows: chartTime = grid time
+
+    # Collect filled points
+    filled = out[out["is_interpolated"]].reset_index()
+    if not filled.empty:
+        interpolated_records.append(filled[["encounterId", "timestamp", "Temp."]])
+
+    return out.reset_index()
+
+blaas_2h_filled = (
+    selected
+    .groupby("encounterId", group_keys=False)
+    .apply(fill_one)
+    .reset_index(drop=True)
+)[["encounterId", "timestamp", "chartTime", "Temp.", "is_interpolated"]]
+
+
+
+
+
+blaas_2h_filled.to_csv(
+    r"C:\Users\G10073190\Documents\blaas_2h_filled.csv",
+    index=False,
+    date_format="%Y-%m-%d %H:%M:%S",
+    float_format="%.1f",
+)
+print(f"wrote {len(blaas_2h_filled)} rows, {len(blaas_2h_filled.columns)} columns")
+print("columns:", list(blaas_2h_filled.columns))
+
+
+encounter_2df = blaas_2h_filled[ 'encounterId'].value_counts()
+print(blaas_df['encounterId'].value_counts())
+
 
