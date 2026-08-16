@@ -1,0 +1,957 @@
+---
+title: "Robust ARIMA Outlier Detection — Bladder Temperature (2h series)"
+subtitle: "Bianco/REGARIMA outlier detection per encounter with `robustarima::arima.rob`"
+author: ""
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: show
+    code-tools: true
+    embed-resources: true
+    fig-width: 8
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+  cache: true
+params:
+  input_csv: "C:/Users/G10073190/Documents/blaas_2h_filled.csv"
+  out_dir: "C:/Users/G10073190/Documents"
+  run_simulations: false   # case-study injection sweeps (slow!)
+---
+
+```{r setup}
+#| cache: false
+library(dplyr)
+library(lubridate)
+library(robustarima)
+library(ggplot2)
+
+# ---- Parameters ------------------------------------------------------------
+INPUT_CSV <- params$input_csv
+OUT_DIR   <- params$out_dir
+
+P <- 2; D <- 0; Q <- 2      # ARIMA(p, d, q) for the error model
+CRITV   <- 3.0              # outlier critical value (docs: 3 for n < 200)
+MIN_OBS <- 50               # skip encounters shorter than this
+
+# arima.rob outlier.type codes -> labels (per package docs)
+TYPE_LABEL   <- c("1" = "IO", "2" = "AO", "3" = "LS")
+CODE_TO_TYPE <- TYPE_LABEL
+TYPE_CODE    <- c(IO = 1, AO = 2, LS = 3)
+
+out_path <- function(...) file.path(OUT_DIR, ...)
+```
+
+# Data
+
+```{r load-data}
+df <- read.csv(INPUT_CSV, stringsAsFactors = FALSE) %>%
+  mutate(
+    timestamp = ymd_hms(timestamp),        # ISO timestamps parse directly
+    Temp.     = as.numeric(Temp.)
+  ) %>%
+  filter(!is.na(Temp.)) %>%                # arima.rob disallows missing values
+  arrange(encounterId, timestamp)
+
+df %>%
+  summarise(
+    n_encounters     = n_distinct(encounterId),
+    n_rows           = n(),
+    rows_per_enc_min = min(table(encounterId)),
+    rows_per_enc_med = median(table(encounterId)),
+    rows_per_enc_max = max(table(encounterId))
+  )
+```
+
+# Per-encounter outlier detection
+
+Fits `arima.rob` to one encounter's temperature series and extracts the
+detected outliers (additive, level-shift, and innovation). Warnings from the
+robustarima package (raised when it judges the flagged contamination rate too
+high) are captured per encounter so warned encounters can be reported as
+their own category in the summary; the detection output itself is unchanged.
+
+```{r detect}
+detect_one <- function(g) {
+  eid <- g$encounterId[1]
+
+  if (nrow(g) < MIN_OBS) {
+    return(list(
+      status = data.frame(encounterId = eid, status = "too_short",
+                          n_outliers = NA_integer_,
+                          stringsAsFactors = FALSE),
+      flags = NULL
+    ))
+  }
+
+  warn_raised <- FALSE
+  fit <- tryCatch(
+    withCallingHandlers(
+      arima.rob(Temp. ~ 1, data = data.frame(Temp. = g$Temp.),
+                p = P, d = D, q = Q,
+                innov.outlier = FALSE,
+                critv = CRITV, auto.ar = FALSE),
+      warning = function(w) {
+        warn_raised <<- TRUE
+        invokeRestart("muffleWarning")
+      }
+    ),
+    error = function(e) {
+      message(sprintf("encounter %s skipped: %s", eid, conditionMessage(e)))
+      NULL
+    }
+  )
+
+  if (is.null(fit)) {
+    return(list(
+      status = data.frame(encounterId = eid, status = "fit_failed",
+                          n_outliers = NA_integer_,
+                          stringsAsFactors = FALSE),
+      flags = NULL
+    ))
+  }
+
+  o    <- fit$outliers
+  nout <- if (is.null(o)) 0L else o$nout
+
+  flags <- NULL
+  if (nout > 0) {
+    idx <- o$outlier.index
+    flags <- data.frame(
+      encounterId = eid,
+      timestamp   = g$timestamp[idx],                    # map index -> time
+      type        = TYPE_LABEL[as.character(o$outlier.type)],
+      impact      = as.numeric(o$outlier.impact),
+      t_stat      = as.numeric(o$outlier.t.statistics),
+      value       = g$Temp.[idx],
+      stringsAsFactors = FALSE
+    )
+  }
+
+  # Three mutually exclusive categories for processed encounters:
+  #   warned  = the robustarima package raised a warning (regardless of flags)
+  #   flagged = >= 1 outlier detected, no warning
+  #   clean   = 0 outliers detected, no warning
+  status <- if (warn_raised) "warned"
+            else if (nout > 0) "flagged"
+            else "clean"
+
+  list(
+    status = data.frame(encounterId = eid, status = status,
+                        n_outliers = nout, stringsAsFactors = FALSE),
+    flags = flags
+  )
+}
+
+res <- df %>%
+  group_split(encounterId) %>%
+  lapply(detect_one)
+
+detect_status <- bind_rows(lapply(res, `[[`, "status"))
+outliers      <- bind_rows(lapply(res, `[[`, "flags"))
+```
+
+```{r detect-report}
+n_enc       <- n_distinct(df$encounterId)
+n_processed <- sum(!detect_status$status %in% c("too_short"))
+n_failed    <- sum(detect_status$status == "fit_failed")
+n_flagged   <- sum(detect_status$status == "flagged")
+n_clean     <- sum(detect_status$status == "clean")
+n_warned    <- sum(detect_status$status == "warned")
+
+cat(sprintf("encounters total              : %d\n", n_enc))
+cat(sprintf("encounters processed          : %d (>= %d obs)\n",
+            n_processed, MIN_OBS))
+cat(sprintf("  fit failed                  : %d\n", n_failed))
+cat(sprintf("  encounters with >=1 anomaly : %d\n", n_flagged))
+cat(sprintf("  encounters clean            : %d\n", n_clean))
+cat(sprintf("  encounters with warnings    : %d (robustarima warnings)\n",
+            n_warned))
+cat(sprintf("total outliers flagged        : %d\n", nrow(outliers)))
+
+if (nrow(outliers)) {
+  cat("\nbreakdown by type:\n")
+  print(table(outliers$type))
+
+  write.csv(outliers, out_path("blaas_outliers.csv"), row.names = FALSE)
+  write.csv(detect_status, out_path("blaas_detect_status.csv"),
+            row.names = FALSE)
+  print(head(outliers, 15))
+}
+```
+
+# Layer 2 — detection report
+
+Headline = % of encounters with $\ge 1$ detected anomaly; rate = outliers per
+observation. The per-outlier detail table is augmented with:
+
+- `se_omega` = SE($\omega$) = |impact| / |t\_stat| (Maronna eq. 8.120/8.122)
+- `n_obs` = length of that encounter's series
+- `n_interpolated` = interpolated points in that encounter
+
+```{r layer2-report}
+# --- Denominators: every PROCESSED encounter (eligible to be flagged) -------
+obs_per_enc <- df %>%
+  group_by(encounterId) %>%
+  summarise(n_obs = n(), .groups = "drop") %>%
+  filter(n_obs >= MIN_OBS)
+
+processed_ids <- obs_per_enc$encounterId
+n_processed   <- length(processed_ids)
+total_obs     <- sum(obs_per_enc$n_obs)
+
+# --- Interpolated-points count per encounter (guard CSV string coercion) ----
+interp_per_enc <- df %>%
+  mutate(is_interpolated = as.logical(is_interpolated)) %>%
+  group_by(encounterId) %>%
+  summarise(n_interpolated = sum(is_interpolated, na.rm = TRUE),
+            .groups = "drop")
+
+# --- Per-outlier detail table -----------------------------------------------
+outliers_aug <- outliers %>%
+  mutate(se_omega = abs(impact) / abs(t_stat)) %>%
+  left_join(obs_per_enc %>% select(encounterId, n_obs), by = "encounterId") %>%
+  left_join(interp_per_enc, by = "encounterId") %>%
+  mutate(n_interpolated = coalesce(n_interpolated, 0L)) %>%
+  select(encounterId, timestamp, type, impact, t_stat, value,
+         se_omega, n_obs, n_interpolated)
+
+write.csv(outliers_aug, out_path("layer2_outliers_detail.csv"),
+          row.names = FALSE)
+
+# --- Per-encounter outlier counts (0 for clean encounters) ------------------
+per_enc <- obs_per_enc %>%
+  left_join(outliers %>% count(encounterId, name = "n_outliers"),
+            by = "encounterId") %>%
+  left_join(interp_per_enc, by = "encounterId") %>%
+  mutate(
+    n_outliers       = coalesce(n_outliers, 0L),
+    n_interpolated   = coalesce(n_interpolated, 0L),
+    has_anomaly      = n_outliers > 0,
+    outliers_per_obs = n_outliers / n_obs
+  )
+
+# 1. HEADLINE — % of encounters with >= 1 anomaly
+n_with   <- sum(per_enc$has_anomaly)
+pct_with <- 100 * n_with / n_processed
+
+cat(sprintf("encounters processed        : %d\n", n_processed))
+cat(sprintf("encounters with >=1 anomaly : %d (%.1f%%)   <-- HEADLINE\n",
+            n_with, pct_with))
+cat(sprintf("encounters clean            : %d (%.1f%%)\n",
+            n_processed - n_with, 100 - pct_with))
+
+# 2. LENGTH-ADJUSTED RATE — outliers per observation
+total_outliers <- nrow(outliers)
+rate_overall   <- total_outliers / total_obs
+cat(sprintf("\ntotal outliers detected     : %d\n", total_outliers))
+cat(sprintf("total observations          : %d\n", total_obs))
+cat(sprintf("outliers per observation    : %.4f  (= 1 per %.0f obs)\n",
+            rate_overall, 1 / rate_overall))
+cat("\nper-encounter outlier rate (outliers / obs):\n")
+print(summary(per_enc$outliers_per_obs))
+
+# 3. TYPE BREAKDOWN
+type_tbl <- outliers %>%
+  count(type, name = "n") %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>%
+  arrange(desc(n))
+cat("\noutlier type breakdown:\n"); print(type_tbl)
+
+type_enc <- outliers %>%
+  distinct(encounterId, type) %>%
+  count(type, name = "n_encounters") %>%
+  mutate(pct_of_processed = round(100 * n_encounters / n_processed, 1))
+cat("\nencounters affected, by type:\n"); print(type_enc)
+
+# 4. SIZE & SIGNIFICANCE + SE, by type
+size_tbl <- outliers_aug %>%
+  mutate(abs_impact = abs(impact), abs_t = abs(t_stat)) %>%
+  group_by(type) %>%
+  summarise(
+    n          = n(),
+    impact_med = round(median(abs_impact), 2),
+    impact_iqr = round(IQR(abs_impact), 2),
+    impact_max = round(max(abs_impact), 2),
+    U_med      = round(median(abs_t), 2),
+    U_iqr      = round(IQR(abs_t), 2),
+    se_med     = round(median(se_omega), 3),
+    se_iqr     = round(IQR(se_omega), 3),
+    .groups = "drop"
+  )
+cat("\nsize (|impact| °C), significance (|U|), and SE by type:\n")
+print(size_tbl)
+
+# 5. Per-encounter outlier count (affected only)
+cat("\noutliers per encounter (affected encounters only):\n")
+print(summary(per_enc$n_outliers[per_enc$has_anomaly]))
+
+write.csv(per_enc,  out_path("layer2_per_encounter.csv"),  row.names = FALSE)
+write.csv(type_tbl, out_path("layer2_type_breakdown.csv"), row.names = FALSE)
+write.csv(size_tbl, out_path("layer2_size_by_type.csv"),   row.names = FALSE)
+```
+
+# Distribution of the outlier t-statistic
+
+Faceted by outlier type (IO/AO/LS). Uses the absolute t-statistic so the
+types are compared on magnitude.
+
+```{r plot-tstat}
+#| fig-height: 9
+#| fig-width: 7
+plot_df <- outliers %>%
+  filter(!is.na(t_stat)) %>%
+  mutate(
+    abs_t = abs(t_stat),
+    type  = factor(type, levels = c("IO", "AO", "LS"))
+  )
+
+type_n <- plot_df %>% count(type)
+labeller_n <- setNames(
+  sprintf("%s (n = %d)", type_n$type, type_n$n),
+  type_n$type
+)
+
+p_tstat <- ggplot(plot_df, aes(x = abs_t)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 1000,
+                 fill = "steelblue", colour = "white", alpha = 0.8) +
+  geom_density(colour = "red", linewidth = 0.8) +
+  geom_vline(xintercept = 3, linetype = "dashed", colour = "grey40") +
+  facet_wrap(~ type, scales = "free", ncol = 1,
+             labeller = labeller(type = labeller_n)) +
+  labs(
+    title = "Distribution of outlier t-statistic by type",
+    subtitle = "Dashed line = detection threshold (critv = 3)",
+    x = "|t-statistic|", y = "density"
+  ) +
+  theme_minimal(base_size = 12)
+
+p_tstat
+ggsave(out_path("outlier_tstat_by_type.png"), p_tstat,
+       width = 7, height = 9, dpi = 150)
+```
+
+## Right-tail trimming (per-type IQR cutoff)
+
+Tags each outlier as tail/kept relative to its type's `Q3 + 1.5·IQR` cutoff on
+$|t|$, reports the removed tail, and re-plots the kept distribution.
+
+```{r tail-trim}
+#| fig-height: 9
+#| fig-width: 7
+base <- outliers %>%
+  filter(!is.na(t_stat)) %>%
+  mutate(abs_t = abs(t_stat),
+         type  = factor(type, levels = c("IO", "AO", "LS")))
+
+cutoffs <- base %>%
+  group_by(type) %>%
+  summarise(
+    q1     = quantile(abs_t, 0.25),
+    q3     = quantile(abs_t, 0.75),
+    iqr    = q3 - q1,
+    cutoff = q3 + 1.5 * iqr,
+    .groups = "drop"
+  )
+cat("=== Per-type IQR cutoffs on |t_stat| ===\n")
+print(cutoffs)
+
+tagged <- base %>%
+  left_join(cutoffs %>% select(type, cutoff), by = "type") %>%
+  mutate(is_tail = abs_t > cutoff)
+
+kept    <- tagged %>% filter(!is_tail)
+removed <- tagged %>% filter(is_tail)
+
+cat(sprintf("\n=== Removed right-tail outliers: %d of %d (%.1f%%) ===\n",
+            nrow(removed), nrow(base), 100 * nrow(removed) / nrow(base)))
+cat("\nremoved per type:\n")
+print(removed %>% count(type, name = "n_removed"))
+
+removed_report <- removed %>%
+  select(encounterId, timestamp, type, t_stat, impact, value, cutoff) %>%
+  arrange(type, desc(abs(t_stat)))
+cat("\nremoved outliers (head):\n")
+print(head(removed_report, 20))
+
+write.csv(removed_report, out_path("ttail_removed.csv"), row.names = FALSE)
+write.csv(kept %>% select(encounterId, timestamp, type, t_stat, impact, value),
+          out_path("ttail_kept.csv"), row.names = FALSE)
+
+kept_n   <- kept %>% count(type)
+labels_n <- setNames(sprintf("%s (n = %d)", kept_n$type, kept_n$n), kept_n$type)
+
+p_kept <- ggplot(kept, aes(abs_t)) +
+  geom_histogram(bins = 25, fill = "steelblue", colour = "white") +
+  facet_wrap(~ type, scales = "free_y", ncol = 1,
+             labeller = labeller(type = labels_n)) +
+  geom_vline(xintercept = 3, linetype = "dashed", colour = "grey40") +
+  labs(
+    title = "Outlier t-statistic without right tail",
+    subtitle = "Dashed line = detection threshold (critv = 3)",
+    x = "|t-statistic|", y = "count"
+  ) +
+  theme_minimal(base_size = 12)
+
+p_kept
+ggsave(out_path("ttail_kept_distribution.png"), p_kept,
+       width = 7, height = 9, dpi = 150)
+```
+
+# Outlier impact distribution by type
+
+Distribution of $|$impact$|$ (outlier size, in °C) per type, with a log
+x-axis to handle the right skew.
+
+```{r plot-impact}
+#| fig-height: 9
+#| fig-width: 7
+plot_df <- outliers %>%
+  filter(!is.na(impact)) %>%
+  mutate(
+    abs_impact = abs(impact),
+    type       = factor(type, levels = c("IO", "AO", "LS"))
+  ) %>%
+  filter(abs_impact > 0)            # log scale can't show zeros
+
+type_n   <- plot_df %>% count(type)
+labels_n <- setNames(sprintf("%s (n = %d)", type_n$type, type_n$n),
+                     type_n$type)
+
+p_impact <- ggplot(plot_df, aes(abs_impact)) +
+  geom_histogram(bins = 20, fill = "darkorange", colour = "white") +
+  facet_wrap(~ type, scales = "free_y", ncol = 1,
+             labeller = labeller(type = labels_n)) +
+  scale_x_log10() +
+  labs(
+    title = "Outlier impact distribution by type",
+    subtitle = "Impact = estimated outlier size (°C), log x-axis",
+    x = "|impact| (°C, log scale)", y = "count"
+  ) +
+  theme_minimal(base_size = 12)
+
+p_impact
+ggsave(out_path("impact_by_type.png"), p_impact,
+       width = 7, height = 9, dpi = 150)
+```
+
+## Significance vs. size (|U| vs |impact|)
+
+Colored by type, because SE($\omega$) — hence the impact→U conversion —
+differs by type (LS small SE → steep; AO larger SE → shallower). Dotted lines
+are iso-SE references ($U = |\text{impact}| / \text{SE}$).
+
+```{r impact-vs-U}
+plot_df <- outliers_aug %>%
+  filter(!is.na(impact), !is.na(t_stat)) %>%
+  mutate(abs_impact = abs(impact),
+         abs_U      = abs(t_stat),
+         type       = factor(type, levels = c("AO", "LS")))   # IO off
+
+se_refs <- c(0.1, 0.2, 0.4, 0.8)
+xmax <- max(plot_df$abs_impact, na.rm = TRUE)
+iso <- do.call(rbind, lapply(se_refs, function(s)
+  data.frame(se = factor(s), x = c(0, xmax), y = c(0, xmax / s))))
+
+p_iu <- ggplot(plot_df, aes(abs_impact, abs_U)) +
+  geom_line(data = iso, aes(x, y, group = se),
+            colour = "grey75", linetype = "dotted", linewidth = 0.4) +
+  geom_point(aes(colour = type), alpha = 0.4, size = 1.4) +
+  geom_hline(yintercept = 3, linetype = "dashed", colour = "grey40") +
+  scale_colour_manual(values = c(AO = "#d62728", LS = "#2ca02c")) +
+  coord_cartesian(
+    xlim = c(0, quantile(plot_df$abs_impact, 0.99)),
+    ylim = c(0, quantile(plot_df$abs_U, 0.99))
+  ) +
+  labs(
+    title = "Outlier significance (|U|) vs. size (|impact|)",
+    subtitle = "Dashed line = detection threshold (critv = 3)",
+    x = "|impact|  (omega, °C)",
+    y = "|U|  (detection statistic)",
+    colour = "type"
+  ) +
+  theme_minimal(base_size = 12)
+
+p_iu
+ggsave(out_path("impact_vs_U.png"), p_iu, width = 8, height = 6, dpi = 150)
+```
+
+# Per-encounter series plot
+
+Plots one encounter's temperature series, marks detected outliers by type,
+and annotates each with its t-statistic.
+
+```{r plot-encounter-fn}
+TYPE_COL   <- c(IO = "#1f77b4", AO = "#d62728", LS = "#2ca02c")
+TYPE_SHAPE <- c(IO = 3, AO = 2, LS = 5)
+
+plot_encounter_outliers <- function(enc_id, df, outliers, save_dir = NULL) {
+  series <- df %>%
+    filter(encounterId == enc_id) %>%
+    arrange(timestamp)
+  if (nrow(series) == 0) stop(sprintf("no data for encounter %s", enc_id))
+
+  flags <- outliers %>%
+    filter(encounterId == enc_id) %>%
+    mutate(type = factor(type, levels = names(TYPE_COL)))
+
+  p <- ggplot(series, aes(timestamp, Temp.)) +
+    geom_line(colour = "grey50", linewidth = 0.5) +
+    geom_point(colour = "grey30", size = 1)
+
+  if (nrow(flags) > 0) {
+    p <- p +
+      geom_point(data = flags,
+                 aes(timestamp, value, colour = type, shape = type),
+                 size = 4, stroke = 1.1) +
+      geom_text(data = flags,
+                aes(timestamp, value,
+                    label = sprintf("t=%.2f", t_stat), colour = type),
+                vjust = 2.2, size = 3, show.legend = FALSE) +
+      scale_colour_manual(values = TYPE_COL, drop = FALSE, name = "type") +
+      scale_shape_manual(values = TYPE_SHAPE, drop = FALSE, name = "type")
+  }
+
+  p <- p +
+    labs(
+      title = sprintf("Encounter %s — temperature with detected outliers", enc_id),
+      x = "time", y = "Temperatuur (°C)"
+    ) +
+    theme_minimal(base_size = 12)
+
+  if (!is.null(save_dir)) {
+    f <- file.path(save_dir, sprintf("encounter_%s_outliers.png", enc_id))
+    ggsave(f, p, width = 11, height = 5, dpi = 150)
+  } else {
+    print(p)
+  }
+  invisible(p)
+}
+```
+
+```{r plot-encounter-example}
+#| fig-width: 11
+#| fig-height: 5
+plot_encounter_outliers(enc_id = 30775, df = df, outliers = outliers)
+
+# Or loop over every encounter that had an outlier, saving each:
+# for (eid in unique(outliers$encounterId))
+#   plot_encounter_outliers(eid, df, outliers,
+#                           save_dir = out_path("outlier_plots"))
+```
+
+# Case studies — AO injection on 10 clean series
+
+Both studies inject **additive outliers (AO) only**, with random sign per
+injected point, into the **same ten clean encounters**, and run the **exact
+production detector**: fixed ARIMA(`r P`, `r D`, `r Q`),
+`innov.outlier = FALSE`, `critv = `r CRITV``, `auto.ar = FALSE`.
+
+- **Study 1 — reliability.** At a fixed 5% contamination, AOs of magnitude
+  `{0.3, 0.5, 1.0, 1.5, 2.0}` °C are injected and swept. Question: how
+  reliably does the detector recover injected outliers across magnitudes,
+  and how many false positives does it produce along the way? Within a
+  series the injection locations are held fixed across magnitudes, so the
+  magnitude effect is isolated.
+- **Study 2 — swamping.** At a fixed magnitude (set below), contamination is
+  swept over `{5, 10, 15, 25}`%. Question: do false positives rise as the
+  series gets more contaminated? Locations are drawn fresh at every
+  contamination level.
+
+Every injected point is classified as **recovered** (AO detected at the
+location), **misspecified** (an outlier of another type detected there), or
+**missed** (nothing detected there). Any detection away from all injected
+locations counts as a **false positive**.
+
+::: {.callout-note}
+These sweeps re-fit `arima.rob` many times. They run only when
+`params$run_simulations` is `TRUE` — render with
+`quarto render blaas_outlier_analysis.qmd -P run_simulations:true`.
+:::
+
+```{r case-setup}
+#| eval: !expr params$run_simulations
+# >>> FILL IN: ten clean encounter IDs for the case studies <<<
+CASE_IDS <- c()          # e.g. c(5729, 6011, ...)
+
+# Clean = processed, no flags, no robustarima warning
+clean_ids <- detect_status %>%
+  filter(status == "clean") %>%
+  pull(encounterId)
+
+if (length(CASE_IDS) == 0) {
+  CASE_IDS <- head(clean_ids, 10)
+  cat("CASE_IDS not set — defaulting to the first 10 clean encounters:\n")
+}
+stopifnot(all(CASE_IDS %in% detect_status$encounterId))
+not_clean <- setdiff(CASE_IDS, clean_ids)
+if (length(not_clean) > 0)
+  warning("these CASE_IDS are not in the clean pool: ",
+          paste(not_clean, collapse = ", "))
+print(CASE_IDS)
+
+CS_TOL    <- 1                              # location tolerance for a "hit"
+CS_MAGS   <- c(0.3, 0.5, 1.0, 1.5, 2.0)     # study 1: magnitude sweep (°C)
+CS_CONTAM <- c(0.05, 0.10, 0.15, 0.25)      # study 2: contamination sweep
+
+# The EXACT production detector (same spec as detect_one above)
+fit_detect <- function(y) {
+  withCallingHandlers(
+    arima.rob(Temp. ~ 1, data = data.frame(Temp. = y),
+              p = P, d = D, q = Q,
+              innov.outlier = FALSE, critv = CRITV, auto.ar = FALSE),
+    warning = function(w) invokeRestart("muffleWarning")
+  )
+}
+
+inject_AO_multi <- function(y, locs, signs, mag) {
+  y[locs] <- y[locs] + signs * mag
+  y
+}
+
+# Classify every injected location and collect off-location false positives.
+classify_fit_result <- function(fit, locs, tol = CS_TOL) {
+  o <- fit$outliers
+  det_idx  <- integer(0); det_type <- character(0)
+  if (!is.null(o) && o$nout > 0) {
+    det_idx  <- o$outlier.index
+    det_type <- unname(CODE_TO_TYPE[as.character(o$outlier.type)])
+  }
+  detected <- vapply(locs, function(L) {
+    hit <- which(abs(det_idx - L) <= tol)
+    if (!length(hit)) "none"
+    else if (any(det_type[hit] == "AO")) "AO"
+    else det_type[hit[1]]                     # misspecified type
+  }, character(1))
+  is_fp <- if (length(det_idx))
+    vapply(det_idx, function(i) all(abs(i - locs) > tol), logical(1))
+  else logical(0)
+  list(detected = detected,
+       fp_type  = det_type[is_fp],
+       n_fp     = sum(is_fp))
+}
+
+# One run = one series x one contamination fraction x one magnitude.
+# The seed determines the injection locations:
+#   study 1 uses ONE seed per series -> same locations across magnitudes
+#   study 2 uses a seed per (series, level) -> fresh locations per level
+run_case <- function(eid, contam_frac, mag, seed_offset = 0) {
+  set.seed(eid + seed_offset)
+  y0 <- df$Temp.[df$encounterId == eid]
+  n  <- length(y0)
+  n_inject <- max(1, round(contam_frac * n))
+  locs     <- sort(sample(seq(3, n - 2), n_inject))
+  signs    <- sample(c(1, -1), n_inject, replace = TRUE)
+
+  y_inj <- inject_AO_multi(y0, locs, signs, mag)
+  fit   <- tryCatch(fit_detect(y_inj), error = function(e) NULL)
+
+  if (is.null(fit)) {
+    return(list(
+      locations = data.frame(encounterId = eid, n_obs = n,
+                             contam_target = contam_frac,
+                             contam_actual = n_inject / n,
+                             magnitude = mag, location = locs,
+                             injected = "AO", detected = NA_character_),
+      summary = data.frame(encounterId = eid, n_obs = n,
+                           contam_target = contam_frac,
+                           contam_actual = n_inject / n,
+                           magnitude = mag, n_injected = n_inject,
+                           n_recovered = NA, n_misspec = NA, n_missed = NA,
+                           n_fp = NA, fit_ok = FALSE)
+    ))
+  }
+
+  cl <- classify_fit_result(fit, locs)
+  list(
+    locations = data.frame(encounterId = eid, n_obs = n,
+                           contam_target = contam_frac,
+                           contam_actual = n_inject / n,
+                           magnitude = mag, location = locs,
+                           injected = "AO", detected = cl$detected),
+    fp = if (cl$n_fp > 0)
+      data.frame(encounterId = eid, n_obs = n,
+                 contam_target = contam_frac, magnitude = mag,
+                 fp_type = cl$fp_type) else NULL,
+    summary = data.frame(
+      encounterId = eid, n_obs = n,
+      contam_target = contam_frac, contam_actual = n_inject / n,
+      magnitude = mag, n_injected = n_inject,
+      n_recovered = sum(cl$detected == "AO"),
+      n_misspec   = sum(!cl$detected %in% c("AO", "none")),
+      n_missed    = sum(cl$detected == "none"),
+      n_fp        = cl$n_fp, fit_ok = TRUE)
+  )
+}
+
+collect_runs <- function(runs) {
+  list(
+    locations = bind_rows(lapply(runs, `[[`, "locations")),
+    fp        = bind_rows(lapply(runs, `[[`, "fp")),
+    summary   = bind_rows(lapply(runs, `[[`, "summary"))
+  )
+}
+```
+
+## Study 1 — reliability: magnitude sweep at 5% contamination
+
+```{r case-study1}
+#| eval: !expr params$run_simulations
+STUDY1_SEED <- 1   # one seed per series -> locations fixed across magnitudes
+
+grid1 <- expand.grid(encounterId = CASE_IDS, mag = CS_MAGS) %>%
+  mutate(contam = 0.05)
+
+study1 <- collect_runs(
+  Map(function(eid, mg) run_case(eid, 0.05, mg, STUDY1_SEED),
+      grid1$encounterId, grid1$mag)
+)
+
+cat("=== Study 1: recovery & false positives by magnitude ===\n")
+study1$summary %>%
+  filter(fit_ok) %>%
+  group_by(magnitude) %>%
+  summarise(
+    n_series      = n_distinct(encounterId),
+    recovery_rate = sum(n_recovered) / sum(n_injected),
+    miss_rate     = sum(n_missed)    / sum(n_injected),
+    misspec_rate  = sum(n_misspec)   / sum(n_injected),
+    fp_per_series = mean(n_fp),
+    fp_rate       = sum(n_fp) / sum(n_obs - n_injected),
+    .groups = "drop"
+  ) %>%
+  print(digits = 3)
+
+cat("\n=== Study 1: confusion matrix (injected AO vs detected type) ===\n")
+print(with(study1$locations, table(injected, detected, useNA = "ifany")))
+
+cat("\n=== Study 1: confusion by magnitude (row-normalized) ===\n")
+print(round(prop.table(
+  with(study1$locations, table(magnitude, detected)), margin = 1), 3))
+
+if (nrow(study1$fp) > 0) {
+  cat("\n=== Study 1: false-positive flags by type ===\n")
+  print(with(study1$fp, table(magnitude, fp_type)))
+}
+```
+
+## Study 2 — swamping: contamination sweep at fixed magnitude
+
+```{r case-study2}
+#| eval: !expr params$run_simulations
+# >>> CHOOSE the injected AO magnitude (°C) here <<<
+CS_MAG_FIXED <- 0.8
+
+# Same ten series as study 1; fresh locations per contamination level.
+study2_seed <- function(contam) 2000 + round(1000 * contam)
+
+grid2 <- expand.grid(encounterId = CASE_IDS, contam = CS_CONTAM)
+
+study2 <- collect_runs(
+  Map(function(eid, cf) run_case(eid, cf, CS_MAG_FIXED, study2_seed(cf)),
+      grid2$encounterId, grid2$contam)
+)
+
+cat(sprintf("=== Study 2: false positives by contamination (magnitude %.2f °C) ===\n",
+            CS_MAG_FIXED))
+n_failed_s2 <- sum(!study2$summary$fit_ok)
+if (n_failed_s2 > 0)
+  cat(sprintf("(fits failed: %d — excluded from the rates below)\n", n_failed_s2))
+study2$summary %>%
+  filter(fit_ok) %>%
+  group_by(contam_target) %>%
+  summarise(
+    n_series      = n_distinct(encounterId),
+    recovery_rate = sum(n_recovered) / sum(n_injected),
+    fp_per_series = mean(n_fp),
+    fp_rate       = sum(n_fp) / sum(n_obs - n_injected),
+    .groups = "drop"
+  ) %>%
+  print(digits = 3)
+
+cat("\n=== Study 2: confusion matrix (injected AO vs detected type) ===\n")
+print(with(study2$locations, table(injected, detected, useNA = "ifany")))
+
+cat("\n=== Study 2: confusion by contamination level (row-normalized) ===\n")
+print(round(prop.table(
+  with(study2$locations, table(contam_target, detected)), margin = 1), 3))
+
+if (nrow(study2$fp) > 0) {
+  cat("\n=== Study 2: false-positive flags by type ===\n")
+  print(with(study2$fp, table(contam_target, fp_type)))
+}
+```
+
+## Two-panel rate plot (both studies)
+
+Left panel: rates vs injected magnitude (Study 1, 5% contamination). Right
+panel: rates vs contamination level (Study 2, fixed magnitude). Lines:
+recovered / misspecified / missed as shares of injected points, and false
+positives per non-injected observation.
+
+```{r case-plot}
+#| eval: !expr params$run_simulations
+#| fig-width: 10
+#| fig-height: 4.5
+rates_from <- function(smry, xvar, xlab_fmt) {
+  smry %>%
+    filter(fit_ok) %>%
+    group_by(x = .data[[xvar]]) %>%
+    summarise(
+      recovered      = sum(n_recovered) / sum(n_injected),
+      misspecified   = sum(n_misspec)   / sum(n_injected),
+      missed         = sum(n_missed)    / sum(n_injected),
+      false_positive = sum(n_fp) / sum(n_obs - n_injected),
+      .groups = "drop"
+    ) %>%
+    tidyr::pivot_longer(-x, names_to = "outcome", values_to = "rate") %>%
+    mutate(x_lab = xlab_fmt(x))
+}
+
+pd <- bind_rows(
+  rates_from(study1$summary, "magnitude",
+             function(x) sprintf("%.1f", x)) %>%
+    mutate(panel = "Outlier magnitude (°C)"),
+  rates_from(study2$summary, "contam_target",
+             function(x) sprintf("%.0f%%", 100 * x)) %>%
+    mutate(panel = "Contamination rate")
+) %>%
+  mutate(
+    panel   = factor(panel, levels = c("Outlier magnitude (°C)",
+                                       "Contamination rate")),
+    outcome = factor(outcome, levels = c("recovered", "misspecified",
+                                         "missed", "false_positive")),
+    x_lab   = factor(x_lab, levels = unique(x_lab))
+  )
+
+OUTCOME_COL <- c(recovered      = "#2ca02c",
+                 misspecified   = "#9467bd",
+                 missed         = "#1f77b4",
+                 false_positive = "#d62728")
+OUTCOME_LTY <- c(recovered      = "solid",
+                 misspecified   = "dashed",
+                 missed         = "dotted",
+                 false_positive = "dashed")
+
+p_case <- ggplot(pd, aes(x_lab, rate, colour = outcome,
+                         linetype = outcome, group = outcome)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.8) +
+  facet_wrap(~ panel, scales = "free_x") +
+  scale_colour_manual(values = OUTCOME_COL, name = NULL) +
+  scale_linetype_manual(values = OUTCOME_LTY, name = NULL) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = "rate",
+       title = "AO recovery, misspecification, and false positives — production detector",
+       subtitle = sprintf(
+         "Left: 5%% contamination, magnitude swept | Right: magnitude %.2f °C, contamination swept | 10 clean series",
+         CS_MAG_FIXED)) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+p_case
+ggsave(out_path("case_rates_two_panel.png"), p_case,
+       width = 10, height = 4.5, dpi = 150)
+```
+
+## Series plots — one series per condition
+
+The first case series (`CASE_IDS[1]`) is shown at every condition: 5 plots
+for the Study 1 magnitudes, 4 for the Study 2 contamination levels (9 total).
+The seeds match the studies exactly, so the plots show the very injections
+that produced the numbers above. Uncomment the loop at the bottom to save
+plots for all ten series.
+
+```{r case-series-fn}
+#| eval: !expr params$run_simulations
+plot_case_series <- function(eid, contam_frac, mag, seed_offset) {
+  set.seed(eid + seed_offset)
+  enc <- df %>% filter(encounterId == eid) %>% arrange(timestamp)
+  y0  <- enc$Temp.; ts <- enc$timestamp; n <- length(y0)
+  n_inject <- max(1, round(contam_frac * n))
+  locs     <- sort(sample(seq(3, n - 2), n_inject))
+  signs    <- sample(c(1, -1), n_inject, replace = TRUE)
+  y_inj    <- inject_AO_multi(y0, locs, signs, mag)
+
+  fit <- tryCatch(fit_detect(y_inj), error = function(e) NULL)
+  if (is.null(fit)) {
+    cat(sprintf("eid %s | contam %.0f%% | mag %.1f: fit failed\n",
+                eid, 100 * contam_frac, mag))
+    return(invisible(NULL))
+  }
+  cl <- classify_fit_result(fit, locs)
+
+  o <- fit$outliers
+  det_idx <- if (!is.null(o) && o$nout > 0) o$outlier.index else integer(0)
+  fp_idx  <- det_idx[vapply(det_idx, function(i) all(abs(i - locs) > CS_TOL),
+                            logical(1))]
+
+  series_df <- data.frame(timestamp = ts, temp = y_inj)
+  inj_df    <- data.frame(timestamp = ts[locs], temp = y_inj[locs],
+                          outcome = ifelse(cl$detected == "AO", "recovered",
+                                    ifelse(cl$detected == "none", "missed",
+                                           "misspecified")))
+  fp_df <- if (length(fp_idx)) data.frame(timestamp = ts[fp_idx],
+                                          temp = y_inj[fp_idx]) else NULL
+
+  p <- ggplot(series_df, aes(timestamp, temp)) +
+    geom_line(colour = "grey55", linewidth = 0.4) +
+    geom_point(colour = "grey35", size = 0.8) +
+    geom_point(data = inj_df, aes(colour = outcome),
+               shape = 1, size = 3.2, stroke = 1.2) +
+    scale_colour_manual(values = c(recovered = "#2ca02c",
+                                   misspecified = "#9467bd",
+                                   missed = "#d62728"),
+                        name = "injected AO", drop = FALSE) +
+    labs(title = sprintf(
+           "Encounter %s — AO injection, magnitude %.1f °C, %.0f%% contamination",
+           eid, mag, 100 * contam_frac),
+         subtitle = sprintf("n = %d | %d injected | × = false-positive flag",
+                            n, n_inject),
+         x = "time", y = "Temp (°C)") +
+    theme_minimal(base_size = 11)
+  if (!is.null(fp_df))
+    p <- p + geom_point(data = fp_df, shape = 4, size = 3,
+                        colour = "black", stroke = 1)
+  print(p)
+  ggsave(out_path(sprintf("case_series_%s_mag%.1f_c%.0f.png",
+                          eid, mag, 100 * contam_frac)),
+         p, width = 10, height = 4.5, dpi = 150)
+  invisible(p)
+}
+```
+
+```{r case-series-study1}
+#| eval: !expr params$run_simulations
+#| fig-width: 10
+#| fig-height: 4.5
+# Study 1 conditions: first series at each magnitude (5% contamination)
+for (m in CS_MAGS)
+  plot_case_series(CASE_IDS[1], 0.05, m, STUDY1_SEED)
+```
+
+```{r case-series-study2}
+#| eval: !expr params$run_simulations
+#| fig-width: 10
+#| fig-height: 4.5
+# Study 2 conditions: first series at each contamination level
+for (cf in CS_CONTAM)
+  plot_case_series(CASE_IDS[1], cf, CS_MAG_FIXED, study2_seed(cf))
+
+# All ten series at every condition (saves 90 PNGs):
+# for (eid in CASE_IDS) {
+#   for (m in CS_MAGS)   plot_case_series(eid, 0.05, m, STUDY1_SEED)
+#   for (cf in CS_CONTAM) plot_case_series(eid, cf, CS_MAG_FIXED, study2_seed(cf))
+# }
+```
+
+# Session info
+
+```{r session-info}
+#| cache: false
+sessionInfo()
+```
