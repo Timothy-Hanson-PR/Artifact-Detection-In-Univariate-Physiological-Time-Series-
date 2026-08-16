@@ -91,35 +91,7 @@ been_r_df['chartTime']= pd.to_datetime(been_r_df["chartTime"])
 been_r_freq = been_r_df['chartTime'].diff().dropna().value_counts()
 print(been_r_freq)
 
-# df['timestamp'] = pd.to_datetime(df['chartTime'], errors ='coerce')
-#
-# blaas_df['timestamp'] = pd.to_datetime(blaas_df['chartTime'], errors ='raise')
-# blaas_df['timestamp']
-#
-# blaas_df = blaas_df.dropna(subset=['timestamp'])
-# blaas_df = blaas_df.sort_values(by='timestamp')
-#
-#
-# agg_map = {}
-#
-# for col in blaas_df.columns:
-#     if col == 'timestamp':
-#         continue
-#     elif pd.api.types.is_numeric_dtype(blaas_df[col]):
-#         agg_map[col] = 'mean'
-#     else:
-#         agg_map[col] = 'first'
-#
-# blaas_df = blaas_df.groupby('timestamp', as_index=False).agg(agg_map)
-# blaas_df = blaas_df.set_index('timestamp').sort_index()
-#
-# blaas_hourly = blaas_df.resample('2h').agg(agg_map)
-#
-# num_cols = blaas_hourly.select_dtypes(include='number').columns
-# blaas_hourly[num_cols] = blaas_hourly[num_cols].interpolate(method='time')
-#
-# blaas_hourly[num_cols] = blaas_hourly[num_cols].ffill().bfill()
-#
+
 
 
 encounter_df = blaas_df[ 'encounterId'].value_counts()
