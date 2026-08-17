@@ -1,5 +1,5 @@
 # Artifact-Detection-In-Univariate-Physiological-Time-Series-
-This repository contains the code for Artifact detection using MUMC+ temperature series 
+This repository contains the code for Artifact detection using temperature series 
 
 > Data_cleaning: contains all the step taken in order to do this analysis 
 
